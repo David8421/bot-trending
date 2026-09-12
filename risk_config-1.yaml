@@ -1,0 +1,54 @@
+# Motor de riesgo transversal
+# ============================
+# Este archivo NO es ejecutado automaticamente por Freqtrade ni por los
+# scripts de IB/prediccion -- es la referencia central de limites que
+# cada modulo debe respetar en su propia configuracion (config.json de
+# Freqtrade, o los parametros del script de IB). Sirve como documento
+# de control y, mas adelante, como fuente para un chequeo automatico
+# que verifique que ningun modulo excede estos limites.
+
+capital_allocation:
+  modulo_a_trend_following: 0.30
+  modulo_b_grid_dca: 0.25
+  modulo_c_scalping: 0.15
+  modulo_d_forex_ib: 0.30
+
+global_limits:
+  # Si el conjunto de todos los modulos automaticos pierde mas de este
+  # porcentaje del capital total en la ventana definida, se debe pausar
+  # TODOS los modulos automaticos (equivalente a "reduce-only" global).
+  max_drawdown_global_pct: 15
+  drawdown_window_days: 30
+
+  # Ningun modulo individual deberia perder mas de esto antes de una
+  # revision manual obligatoria, independientemente del limite global.
+  max_drawdown_per_module_pct: 10
+
+per_module_limits:
+  modulo_a_trend_following:
+    max_open_trades: 2
+    stake_per_trade_pct_of_module: [5, 10]
+    stop_loss_pct: 5
+
+  modulo_b_grid_dca:
+    max_open_trades: 3
+    max_capital_in_grid_pct_of_module: 40
+
+  modulo_c_scalping:
+    max_open_trades: 2
+    stop_loss_pct: 1
+    # Requiere ejecucion en VPS de baja latencia antes de operar en real.
+    requires_low_latency_infra: true
+
+  modulo_d_forex_ib:
+    mode: "semi_automatico"
+    # En semi-automatico, ninguna orden se envia sin confirmacion manual
+    # hasta que el modulo se valide y se decida pasar a automatico.
+    requires_manual_confirmation: true
+
+prediction_layer:
+  # El modulo E nunca ejecuta ordenes directamente. Solo puede usarse
+  # como filtro adicional una vez que walk_forward_validation demuestre
+  # una mejora real frente a no usarlo.
+  role: "filtro_opcional_no_ejecuta"
+  min_accuracy_improvement_required: "documentar comparacion con/sin capa antes de activar"
