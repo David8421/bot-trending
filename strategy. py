@@ -1,0 +1,121 @@
+# -*- coding: utf-8 -*-
+"""
+Modulo A - Trend Following Multi-Indicador (Cripto)
+=====================================================
+Estrategia para Freqtrade. Implementa las reglas definidas en la planeacion:
+
+Entrada (long):
+  - EMA rapida (20) cruza por encima de EMA lenta (50)
+  - RSI entre 40 y 70 (evita comprar en sobrecompra extrema)
+  - MACD con histograma positivo y creciente
+
+Salida:
+  - EMA rapida cruza por debajo de la lenta, o
+  - RSI > 75 (toma de ganancias por sobrecompra), o
+  - Stop-loss fijo / trailing stop (definido abajo)
+
+Gestion de riesgo:
+  - Tamano de posicion fijo por operacion (ver stake_amount en config.json)
+  - Maximo 1-2 posiciones abiertas simultaneas (max_open_trades en config.json)
+
+Timeframe recomendado: 1h o 4h.
+
+IMPORTANTE: esta estrategia debe validarse con backtesting propio
+(freqtrade backtesting) antes de usarse en dry-run o en real. Los
+parametros (periodos de EMA, umbrales de RSI, stop-loss) son un punto
+de partida razonable, no una configuracion optima garantizada.
+"""
+
+import talib.abstract as ta
+import pandas as pd
+from pandas import DataFrame
+from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter
+
+
+class ModuloATrendFollowing(IStrategy):
+    # --- Configuracion general de la estrategia ---
+    timeframe = "4h"
+    can_short = False  # solo long; para futuros/short, ajustar y validar aparte
+
+    # Stop-loss fijo de partida (-5%). Freqtrade usa valores negativos.
+    stoploss = -0.05
+
+    # Trailing stop: se activa despues de +2% de ganancia y sigue el precio
+    # dejando un margen de 1.5%.
+    trailing_stop = True
+    trailing_stop_positive = 0.015
+    trailing_stop_positive_offset = 0.02
+    trailing_only_offset_is_reached = True
+
+    # ROI minimo: 0% desde el minuto 0 (dejamos que la logica de salida
+    # y el trailing stop decidan, en vez de forzar una toma de ganancia fija).
+    minimal_roi = {"0": 10}  # efectivamente desactivado; se prioriza trailing+señal
+
+    # Numero maximo de posiciones abiertas simultaneas (regla: 1-2)
+    max_open_trades = 2
+
+    # Parametros optimizables via freqtrade hyperopt (complejidad "media")
+    ema_fast_length = IntParameter(10, 30, default=20, space="buy")
+    ema_slow_length = IntParameter(40, 60, default=50, space="buy")
+    rsi_buy_min = IntParameter(30, 45, default=40, space="buy")
+    rsi_buy_max = IntParameter(60, 75, default=70, space="buy")
+    rsi_sell_threshold = IntParameter(70, 85, default=75, space="sell")
+
+    startup_candle_count: int = 60
+
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        # EMAs
+        dataframe["ema_fast"] = ta.EMA(dataframe, timeperiod=self.ema_fast_length.value)
+        dataframe["ema_slow"] = ta.EMA(dataframe, timeperiod=self.ema_slow_length.value)
+
+        # RSI
+        dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)
+
+        # MACD
+        macd = ta.MACD(dataframe)
+        dataframe["macd"] = macd["macd"]
+        dataframe["macdsignal"] = macd["macdsignal"]
+        dataframe["macdhist"] = macd["macdhist"]
+        dataframe["macdhist_prev"] = dataframe["macdhist"].shift(1)
+
+        return dataframe
+
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        conditions = [
+            # Cruce alcista de EMAs (rapida cruza por encima de la lenta)
+            (dataframe["ema_fast"] > dataframe["ema_slow"])
+            & (dataframe["ema_fast"].shift(1) <= dataframe["ema_slow"].shift(1)),
+
+            # RSI en rango saludable (no sobrecomprado, no sobrevendido extremo)
+            (dataframe["rsi"] > self.rsi_buy_min.value)
+            & (dataframe["rsi"] < self.rsi_buy_max.value),
+
+            # MACD historgram positivo y creciente
+            (dataframe["macdhist"] > 0) & (dataframe["macdhist"] > dataframe["macdhist_prev"]),
+
+            # Filtro basico de liquidez/actividad
+            (dataframe["volume"] > 0),
+        ]
+
+        dataframe.loc[
+            (conditions[0] & conditions[1] & conditions[2] & conditions[3]),
+            "enter_long",
+        ] = 1
+
+        return dataframe
+
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        conditions = [
+            # Cruce bajista de EMAs (salida por reversion de tendencia)
+            (dataframe["ema_fast"] < dataframe["ema_slow"])
+            & (dataframe["ema_fast"].shift(1) >= dataframe["ema_slow"].shift(1))
+        ]
+
+        dataframe.loc[conditions[0], "exit_long"] = 1
+
+        # Salida adicional por sobrecompra extrema (toma de ganancias)
+        dataframe.loc[
+            (dataframe["rsi"] > self.rsi_sell_threshold.value), "exit_long"
+        ] = 1
+
+        return dataframe
